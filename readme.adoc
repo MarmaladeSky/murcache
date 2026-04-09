@@ -1,0 +1,45 @@
+= Murcache
+
+A very simple effectful LRU cache for https://typelevel.org/cats-effect/[Cats Effect] with support for https://www.scala-js.org/[Scala.js] and https://scala-native.org/[Scala Native].
+
+== Usage
+
+=== Mill
+
+[source,scala]
+----
+// JVM
+mvn"digital.junkie::murcache:0.0.1"
+// Scala.js / Scala Native
+mvn"digital.junkie::murcache::0.0.1"
+----
+
+=== sbt
+
+[source,scala]
+----
+// JVM
+"digital.junkie" %% "murcache" % "0.0.1"
+// Scala.js / Scala Native
+"digital.junkie" %%% "murcache" % "0.0.1"
+----
+
+=== Example
+
+[source,scala]
+----
+import cats.effect.IO
+import digital.junkie.murcache.MurCache
+
+val program = for {
+  cache <- MurCache.simple[IO, String, Int](
+    fetch = key => IO.pure(key.length),
+    size = 2
+  )
+  first <- cache.get("hello")
+  second <- cache.get("hello")
+  _ <- cache.put("world", 99)
+  third <- cache.get("world")
+  _ <- cache.invalidate("hello")
+} yield (first, second, third)
+----

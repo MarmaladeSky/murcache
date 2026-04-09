@@ -1,0 +1,106 @@
+//| mill-jvm-version: system
+//| mill-version: 1.1.5
+//| mvnDeps:
+//|   - org.typelevel::scalac-options:0.1.9
+//|   - digital.junkie::mill-explicit-dependencies:$MILL_VERSION
+//
+package build
+
+import mill.*, scalalib.*, scalanativelib.*, scalajslib.*, publish.*
+import org.typelevel.scalacoptions.*
+import digital.junkie.milledependencies.ExplicitDependencies
+import mill.api.BuildCtx
+
+trait MurCachePublish extends PublishModule {
+  def artifactName = "murcache"
+  def publishVersion = "0.0.1"
+
+  def pomSettings = PomSettings(
+    description = "A KISS LRU cache for Cats Effect",
+    organization = "digital.junkie",
+    url = "https://github.com/MarmaladeSky/murcache",
+    licenses = Seq(License.`Apache-2.0`),
+    versionControl = VersionControl.github("MarmaladeSky", "murcache"),
+    developers = Seq(
+      Developer(
+        id = "marmaladesky",
+        name = "David Akermann",
+        url = "https://github.com/MarmaladeSky"
+      )
+    )
+  )
+}
+
+object `package` extends ScalaModule, MurCachePublish, ExplicitDependencies {
+  def scalaVersion = "3.8.3"
+
+  def scalacOptions = Task {
+    super.scalacOptions() ++ ScalacOptions.tokensForVersion(
+      ScalaVersion.unsafeFromString(scalaVersion()),
+      ScalacOptions.default ++ ScalacOptions.fatalWarningOptions
+    )
+  }
+
+  def mvnDeps = Seq(
+    mvn"org.typelevel::cats-effect:3.7.0",
+    mvn"org.typelevel::cats-effect-kernel:3.7.0",
+    mvn"org.typelevel::cats-core:2.13.0"
+  )
+
+  object test extends ScalaTests, TestModule.Utest {
+    def testParallelism = false
+    def mvnDeps = Seq(mvn"com.lihaoyi::utest:0.9.1")
+    override def scalacOptions = Task {
+      super
+        .scalacOptions()
+        .filterNot(opt =>
+          opt == "-Wvalue-discard" || opt == "-Wnonunit-statement"
+        )
+    }
+  }
+
+  object native
+      extends ScalaNativeModule,
+        MurCachePublish,
+        ExplicitDependencies {
+    def scalaVersion = "3.8.3"
+    def scalaNativeVersion = "0.5.11"
+    def sources = Task.Sources(BuildCtx.workspaceRoot / "src")
+
+    def mvnDeps = Seq(
+      mvn"org.typelevel::cats-effect::3.7.0",
+      mvn"org.typelevel::cats-effect-kernel::3.7.0",
+      mvn"org.typelevel::cats-core::2.13.0"
+    )
+
+    object test extends ScalaNativeTests, TestModule.Utest {
+      def testParallelism = false
+      def sources = Task.Sources(BuildCtx.workspaceRoot / "test" / "src")
+      override def mvnDeps = Task {
+        native.mvnDeps() ++ Seq(mvn"com.lihaoyi::utest::0.9.1")
+      }
+      def testFramework = "utest.runner.Framework"
+    }
+  }
+
+  object js extends ScalaJSModule, MurCachePublish, ExplicitDependencies {
+    def scalaVersion = "3.8.3"
+    def scalaJSVersion = "1.20.2"
+    def sources = Task.Sources(BuildCtx.workspaceRoot / "src")
+
+    def mvnDeps = Seq(
+      mvn"org.typelevel::cats-effect::3.7.0",
+      mvn"org.typelevel::cats-effect-kernel::3.7.0",
+      mvn"org.typelevel::cats-core::2.13.0"
+    )
+
+    object test extends ScalaJSTests, TestModule.Utest {
+      def testParallelism = false
+      def sources = Task.Sources(BuildCtx.workspaceRoot / "test" / "src")
+      override def mvnDeps = Task {
+        js.mvnDeps() ++ Seq(mvn"com.lihaoyi::utest::0.9.1")
+      }
+      def testFramework = "utest.runner.Framework"
+    }
+  }
+}
