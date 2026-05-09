@@ -3,7 +3,6 @@ package digital.junkie.murcache
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 import cats.syntax.parallel.*
-import scala.concurrent.CancellationException
 import scala.concurrent.Future
 import scala.concurrent.duration.*
 import utest.*
@@ -150,10 +149,10 @@ object MurCacheTests extends TestSuite:
       })
     }
 
-    test("cancellation of fetching fiber propagates to waiting fibers") {
+    test("cancellation of one requestor does not cancel fetch for other waiters") {
       val test = for
         cache <- MurCache.simple[IO, String, Int](
-          fetch = _ => IO.sleep(3.seconds).as(42),
+          fetch = _ => IO.sleep(100.millis).as(42),
           size = 10
         )
         fiber1 <- cache.get("hello").start
@@ -161,12 +160,34 @@ object MurCacheTests extends TestSuite:
         fiber2 <- cache.get("hello").start
         _ <- IO.sleep(10.millis)
         _ <- fiber1.cancel
-        result <- fiber2.joinWithNever.timeout(500.millis).attempt
+        result <- fiber2.joinWithNever.timeout(500.millis)
       yield result
 
-      run(test.map(result =>
-        assert(result.left.exists(_.isInstanceOf[CancellationException]))
-      ))
+      run(test.map(result => assert(result == 42)))
+    }
+
+    test("fetch is cancelled once the last waiter is cancelled") {
+      val test = for
+        cancelled <- IO.ref(false)
+        cache <- MurCache.simple[IO, String, Int](
+          fetch = _ => IO.never[Int].onCancel(cancelled.set(true)),
+          size = 10
+        )
+        fiber1 <- cache.get("hello").start
+        _ <- IO.sleep(10.millis)
+        fiber2 <- cache.get("hello").start
+        _ <- IO.sleep(10.millis)
+        _ <- fiber1.cancel
+        didCancelEarly <- cancelled.get
+        _ <- fiber2.cancel
+        _ <- IO.sleep(50.millis)
+        didCancelFinally <- cancelled.get
+      yield (didCancelEarly, didCancelFinally)
+
+      run(test.map { case (didCancelEarly, didCancelFinally) =>
+        assert(didCancelEarly == false)
+        assert(didCancelFinally == true)
+      })
     }
 
     test("concurrent gets on same key wait on same Deferred") {
