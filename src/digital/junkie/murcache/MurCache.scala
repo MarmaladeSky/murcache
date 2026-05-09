@@ -233,12 +233,11 @@ object MurCache {
     if (size <= 0) {
       F.pure { noop(fetch) }
     } else {
-      for {
-        r <- Ref.of[F, Underlying[F, K, V]](
+      Ref
+        .of[F, Underlying[F, K, V]] {
           Underlying[F, K, V](Map.empty, Map.empty, None, None)
-        )
-        cache = impl(fetch, size, r)
-      } yield cache
+        }
+        .map { impl(fetch, size, _) }
     }
   }
 
@@ -349,27 +348,12 @@ object MurCache {
       }
     }
 
-    def invalidate(key: K): F[Boolean] = {
-      r
-        .flatModify { m =>
-          val f = m.get(key) match {
-            case Some(existing) =>
-              existing.complete(cancelError.asLeft).as(true)
-            case None =>
-              F.pure(false)
-          }
-
-          (m.-(key), f)
-        }
-    }
+    def invalidate(key: K): F[Boolean] =
+      r.modify { m => (m.-(key), m.contains(key)) }
 
     def invalidateAll: F[Unit] =
-      for {
-        existing <- r.getAndSet(Underlying(Map.empty, Map.empty, None, None))
-        _ <- existing.map.values.foldLeft(F.unit) { (f, n) =>
-          f.>> { n.complete(cancelError.asLeft) }.void
-        }
-      } yield ()
+      r.getAndSet(Underlying(Map.empty, Map.empty, None, None)).void
+
   }
 
 }

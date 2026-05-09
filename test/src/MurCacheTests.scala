@@ -230,10 +230,10 @@ object MurCacheTests extends TestSuite:
       })
     }
 
-    test("invalidate of an in-flight key wakes existing waiters") {
+    test("invalidate of an in-flight key lets the original getter and waiters receive the fetched value") {
       val test = for
         cache <- MurCache.simple[IO, String, Int](
-          fetch = _ => IO.sleep(3.seconds).as(42),
+          fetch = _ => IO.sleep(100.millis).as(42),
           size = 10
         )
         fiber1 <- cache.get("hello").start
@@ -241,47 +241,56 @@ object MurCacheTests extends TestSuite:
         fiber2 <- cache.get("hello").start
         _ <- IO.sleep(10.millis)
         _ <- cache.invalidate("hello")
-        waiter <- fiber2.joinWithNever.timeout(500.millis).attempt
-        _ <- fiber1.cancel
-      yield waiter
+        waiter <- fiber2.joinWithNever.timeout(500.millis)
+        original <- fiber1.joinWithNever.timeout(500.millis)
+      yield (original, waiter)
 
-      run(test.map(waiter =>
-        assert(waiter.left.exists(_.isInstanceOf[CancellationException]))
-      ))
+      run(test.map { case (original, waiter) =>
+        assert(original == 42)
+        assert(waiter == 42)
+      })
     }
 
-    test("invalidate of an in-flight key also wakes the original getter") {
-      val test = for
-        cache <- MurCache.simple[IO, String, Int](
-          fetch = _ => IO.sleep(3.seconds).as(42),
-          size = 10
-        )
-        fiber <- cache.get("hello").start
-        _ <- IO.sleep(10.millis)
-        _ <- cache.invalidate("hello")
-        original <- fiber.joinWithNever.timeout(500.millis).attempt
-      yield original
-
-      run(test.map(original =>
-        assert(original.left.exists(_.isInstanceOf[CancellationException]))
-      ))
-    }
-
-    test("invalidate of an in-flight key cancels the stale fetch") {
+    test("invalidate of an in-flight key does not cancel its fetch") {
       val test = for
         cancelled <- IO.ref(false)
         cache <- MurCache.simple[IO, String, Int](
-          fetch = _ => IO.never[Int].onCancel(cancelled.set(true)),
+          fetch =
+            _ => IO.sleep(100.millis).as(42).onCancel(cancelled.set(true)),
           size = 10
         )
         fiber <- cache.get("hello").start
         _ <- IO.sleep(10.millis)
         _ <- cache.invalidate("hello")
-        _ <- fiber.join.attempt
-        didCancel <- cancelled.get.timeout(500.millis)
-      yield didCancel
+        result <- fiber.joinWithNever.timeout(500.millis)
+        didCancel <- cancelled.get
+      yield (result, didCancel)
 
-      run(test.map(didCancel => assert(didCancel == true)))
+      run(test.map { case (result, didCancel) =>
+        assert(result == 42)
+        assert(didCancel == false)
+      })
+    }
+
+    test("invalidate of an in-flight key clears the cache: subsequent gets re-fetch") {
+      var calls = 0
+
+      val test = for
+        cache <- MurCache.simple[IO, String, Int](
+          fetch = _ => IO.sleep(50.millis) >> IO { calls += 1; calls },
+          size = 10
+        )
+        fiber <- cache.get("hello").start
+        _ <- IO.sleep(10.millis)
+        _ <- cache.invalidate("hello")
+        first <- fiber.joinWithNever.timeout(500.millis)
+        second <- cache.get("hello")
+      yield (first, second)
+
+      run(test.map { case (first, second) =>
+        assert(first == 1)
+        assert(second == 2)
+      })
     }
 
     test("invalidate of one key does not evict others") {
@@ -482,10 +491,10 @@ object MurCacheTests extends TestSuite:
       run(test.map(_ => assert(callCount == 4)))
     }
 
-    test("invalidateAll wakes waiters for in-flight keys") {
+    test("invalidateAll lets in-flight waiters and the original getter receive their fetched values") {
       val test = for
         cache <- MurCache.simple[IO, String, Int](
-          fetch = _ => IO.sleep(3.seconds).as(42),
+          fetch = _ => IO.sleep(100.millis).as(42),
           size = 10
         )
         fiber1 <- cache.get("hello").start
@@ -493,30 +502,56 @@ object MurCacheTests extends TestSuite:
         fiber2 <- cache.get("hello").start
         _ <- IO.sleep(10.millis)
         _ <- cache.invalidateAll
-        waiter <- fiber2.joinWithNever.timeout(500.millis).attempt
-        _ <- fiber1.cancel
-      yield waiter
+        waiter <- fiber2.joinWithNever.timeout(500.millis)
+        original <- fiber1.joinWithNever.timeout(500.millis)
+      yield (original, waiter)
 
-      run(test.map(waiter =>
-        assert(waiter.left.exists(_.isInstanceOf[CancellationException]))
-      ))
+      run(test.map { case (original, waiter) =>
+        assert(original == 42)
+        assert(waiter == 42)
+      })
     }
 
-    test("invalidateAll cancels stale fetches for in-flight keys") {
+    test("invalidateAll does not cancel in-flight fetches") {
       val test = for
         cancelled <- IO.ref(false)
         cache <- MurCache.simple[IO, String, Int](
-          fetch = _ => IO.never[Int].onCancel(cancelled.set(true)),
+          fetch =
+            _ => IO.sleep(100.millis).as(42).onCancel(cancelled.set(true)),
           size = 10
         )
         fiber <- cache.get("hello").start
         _ <- IO.sleep(10.millis)
         _ <- cache.invalidateAll
-        _ <- fiber.join.attempt
-        didCancel <- cancelled.get.timeout(500.millis)
-      yield didCancel
+        result <- fiber.joinWithNever.timeout(500.millis)
+        didCancel <- cancelled.get
+      yield (result, didCancel)
 
-      run(test.map(didCancel => assert(didCancel == true)))
+      run(test.map { case (result, didCancel) =>
+        assert(result == 42)
+        assert(didCancel == false)
+      })
+    }
+
+    test("invalidateAll of an in-flight key clears the cache: subsequent gets re-fetch") {
+      var calls = 0
+
+      val test = for
+        cache <- MurCache.simple[IO, String, Int](
+          fetch = _ => IO.sleep(50.millis) >> IO { calls += 1; calls },
+          size = 10
+        )
+        fiber <- cache.get("hello").start
+        _ <- IO.sleep(10.millis)
+        _ <- cache.invalidateAll
+        first <- fiber.joinWithNever.timeout(500.millis)
+        second <- cache.get("hello")
+      yield (first, second)
+
+      run(test.map { case (first, second) =>
+        assert(first == 1)
+        assert(second == 2)
+      })
     }
 
     test("invalidateAll evicts put values: subsequent gets re-fetch") {
