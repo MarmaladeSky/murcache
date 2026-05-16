@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 David Akermann
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package digital.junkie.murcache
 
 import cats.effect.IO
@@ -18,7 +34,7 @@ object MurCacheTests extends TestSuite:
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = key => IO.pure(key.length),
-          size = 10
+          maxSize = 10
         )
         result <- cache.get("hello")
       yield result
@@ -32,7 +48,7 @@ object MurCacheTests extends TestSuite:
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = key => IO { callCount += 1; key.length },
-          size = 0
+          maxSize = 0
         )
         _ <- cache.put("hello", 99)
         first <- cache.get("hello")
@@ -76,7 +92,7 @@ object MurCacheTests extends TestSuite:
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = key => IO { callCount += 1; key.length },
-          size = 10
+          maxSize = 10
         )
         first <- cache.get("hello")
         second <- cache.get("hello")
@@ -97,7 +113,7 @@ object MurCacheTests extends TestSuite:
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = _ => IO.sleep(50.millis) >> IO.raiseError(error),
-          size = 10
+          maxSize = 10
         )
         fiber1 <- cache.get("hello").start
         _ <- IO.sleep(10.millis)
@@ -109,7 +125,7 @@ object MurCacheTests extends TestSuite:
       run(test.map(result => assert(result == Left(error))))
     }
 
-    test("cancellation cleans up so subsequent gets do not hang") {
+    test("cancellation cleans up so next get does not hang") {
       val test = for
         attempts <- IO.ref(0)
         cache <- MurCache.simple[IO, String, Int](
@@ -117,7 +133,7 @@ object MurCacheTests extends TestSuite:
             attempts.getAndUpdate(_ + 1).flatMap { n =>
               if n == 0 then IO.sleep(3.seconds).as(0) else IO.pure(42)
             },
-          size = 10
+          maxSize = 10
         )
         fiber <- cache.get("hello").start
         _ <- IO.sleep(10.millis)
@@ -137,7 +153,7 @@ object MurCacheTests extends TestSuite:
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = _ => IO { calls += 1 } >> IO.raiseError(error),
-          size = 10
+          maxSize = 10
         )
         first <- cache.get("hello").attempt
         second <- cache.get("hello").attempt
@@ -150,11 +166,11 @@ object MurCacheTests extends TestSuite:
       })
     }
 
-    test("cancellation of fetching fiber propagates to waiting fibers") {
+    test("fetch cancellation propagates to waiting fibers") {
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = _ => IO.sleep(3.seconds).as(42),
-          size = 10
+          maxSize = 10
         )
         fiber1 <- cache.get("hello").start
         _ <- IO.sleep(10.millis)
@@ -164,9 +180,11 @@ object MurCacheTests extends TestSuite:
         result <- fiber2.joinWithNever.timeout(500.millis).attempt
       yield result
 
-      run(test.map(result =>
-        assert(result.left.exists(_.isInstanceOf[CancellationException]))
-      ))
+      run(
+        test.map(result =>
+          assert(result.left.exists(_.isInstanceOf[CancellationException]))
+        )
+      )
     }
 
     test("concurrent gets on same key wait on same Deferred") {
@@ -176,7 +194,7 @@ object MurCacheTests extends TestSuite:
         cache <- MurCache.simple[IO, String, Int](
           fetch =
             key => IO.sleep(100.millis) >> IO { callCount += 1; key.length },
-          size = 10
+          maxSize = 10
         )
         results <- List.fill(5)(cache.get("hello")).parSequence
       yield results
@@ -191,7 +209,7 @@ object MurCacheTests extends TestSuite:
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = key => IO.pure(key.length),
-          size = 10
+          maxSize = 10
         )
         _ <- cache.get("hello")
         invalidated <- cache.invalidate("hello")
@@ -204,7 +222,7 @@ object MurCacheTests extends TestSuite:
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = key => IO.pure(key.length),
-          size = 10
+          maxSize = 10
         )
         invalidated <- cache.invalidate("hello")
       yield invalidated
@@ -218,7 +236,7 @@ object MurCacheTests extends TestSuite:
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = key => IO { callCount += 1; key.length },
-          size = 10
+          maxSize = 10
         )
         _ <- cache.get("hello")
         _ <- cache.invalidate("hello")
@@ -230,11 +248,13 @@ object MurCacheTests extends TestSuite:
       })
     }
 
-    test("invalidate of an in-flight key lets the original getter and waiters receive the fetched value") {
+    test(
+      "invalidate of in-flight key delivers fetched value to getter and waiters"
+    ) {
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = _ => IO.sleep(100.millis).as(42),
-          size = 10
+          maxSize = 10
         )
         fiber1 <- cache.get("hello").start
         _ <- IO.sleep(10.millis)
@@ -251,13 +271,13 @@ object MurCacheTests extends TestSuite:
       })
     }
 
-    test("invalidate of an in-flight key does not cancel its fetch") {
+    test("invalidate of in-flight key does not cancel its fetch") {
       val test = for
         cancelled <- IO.ref(false)
         cache <- MurCache.simple[IO, String, Int](
           fetch =
             _ => IO.sleep(100.millis).as(42).onCancel(cancelled.set(true)),
-          size = 10
+          maxSize = 10
         )
         fiber <- cache.get("hello").start
         _ <- IO.sleep(10.millis)
@@ -272,13 +292,13 @@ object MurCacheTests extends TestSuite:
       })
     }
 
-    test("invalidate of an in-flight key clears the cache: subsequent gets re-fetch") {
+    test("invalidate of in-flight key clears cache: next get re-fetches") {
       var calls = 0
 
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = _ => IO.sleep(50.millis) >> IO { calls += 1; calls },
-          size = 10
+          maxSize = 10
         )
         fiber <- cache.get("hello").start
         _ <- IO.sleep(10.millis)
@@ -299,7 +319,7 @@ object MurCacheTests extends TestSuite:
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = key => IO { callCount += 1; key.length },
-          size = 10
+          maxSize = 10
         )
         _ <- cache.get("hello")
         _ <- cache.get("world")
@@ -310,13 +330,13 @@ object MurCacheTests extends TestSuite:
       run(test.map(_ => assert(callCount == 2)))
     }
 
-    test("put stores value retrievable via get without calling fetch") {
+    test("put stores value retrievable via get without fetching") {
       var callCount = 0
 
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = key => IO { callCount += 1; key.length },
-          size = 10
+          maxSize = 10
         )
         _ <- cache.put("hello", 99)
         result <- cache.get("hello")
@@ -332,7 +352,7 @@ object MurCacheTests extends TestSuite:
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = key => IO.pure(key.length),
-          size = 10
+          maxSize = 10
         )
         _ <- cache.get("hello")
         _ <- cache.put("hello", 99)
@@ -342,7 +362,7 @@ object MurCacheTests extends TestSuite:
       run(test.map(result => assert(result == 99)))
     }
 
-    test("failed in-flight fetch does not wipe out a newer put for the same key") {
+    test("failed in-flight fetch does not overwrite newer put") {
       val error = new RuntimeException("boom") {
         override def fillInStackTrace() = this
       }
@@ -356,7 +376,7 @@ object MurCacheTests extends TestSuite:
                 calls += 1
                 if calls == 1 then throw error else 42
               },
-          size = 10
+          maxSize = 10
         )
         fiber <- cache.get("hello").start
         _ <- IO.sleep(10.millis)
@@ -371,11 +391,11 @@ object MurCacheTests extends TestSuite:
       })
     }
 
-    test("put during an in-flight fetch wakes existing waiters with the put value") {
+    test("put during in-flight fetch wakes waiters with put value") {
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = _ => IO.sleep(3.seconds).as(42),
-          size = 10
+          maxSize = 10
         )
         fiber1 <- cache.get("hello").start
         _ <- IO.sleep(10.millis)
@@ -389,12 +409,12 @@ object MurCacheTests extends TestSuite:
       run(test.map(value => assert(value == 99)))
     }
 
-    test("put during an in-flight fetch cancels the stale fetch") {
+    test("put during in-flight fetch cancels the stale fetch") {
       val test = for
         cancelled <- IO.ref(false)
         cache <- MurCache.simple[IO, String, Int](
           fetch = _ => IO.never[Int].onCancel(cancelled.set(true)),
-          size = 10
+          maxSize = 10
         )
         fiber <- cache.get("hello").start
         _ <- IO.sleep(10.millis)
@@ -412,7 +432,7 @@ object MurCacheTests extends TestSuite:
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = key => IO { callCount += 1; key.length },
-          size = 10
+          maxSize = 10
         )
         _ <- cache.put("hello", 99)
         result <- cache.get("world")
@@ -430,7 +450,7 @@ object MurCacheTests extends TestSuite:
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = key => IO { callCount += 1; key.length },
-          size = 10
+          maxSize = 10
         )
         _ <- cache.put("hello", 99)
         _ <- cache.invalidate("hello")
@@ -443,13 +463,13 @@ object MurCacheTests extends TestSuite:
       })
     }
 
-    test("concurrent gets after put all return put value without calling fetch") {
+    test("concurrent gets after put return put value without fetching") {
       var callCount = 0
 
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = key => IO { callCount += 1; key.length },
-          size = 10
+          maxSize = 10
         )
         _ <- cache.put("hello", 99)
         results <- List.fill(5)(cache.get("hello")).parSequence
@@ -465,7 +485,7 @@ object MurCacheTests extends TestSuite:
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = key => IO.pure(key.length),
-          size = 10
+          maxSize = 10
         )
         _ <- cache.invalidateAll
       yield ()
@@ -479,7 +499,7 @@ object MurCacheTests extends TestSuite:
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = key => IO { callCount += 1; key.length },
-          size = 10
+          maxSize = 10
         )
         _ <- cache.get("hello")
         _ <- cache.get("world")
@@ -491,11 +511,11 @@ object MurCacheTests extends TestSuite:
       run(test.map(_ => assert(callCount == 4)))
     }
 
-    test("invalidateAll lets in-flight waiters and the original getter receive their fetched values") {
+    test("invalidateAll delivers fetched values to getter and waiters") {
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = _ => IO.sleep(100.millis).as(42),
-          size = 10
+          maxSize = 10
         )
         fiber1 <- cache.get("hello").start
         _ <- IO.sleep(10.millis)
@@ -518,7 +538,7 @@ object MurCacheTests extends TestSuite:
         cache <- MurCache.simple[IO, String, Int](
           fetch =
             _ => IO.sleep(100.millis).as(42).onCancel(cancelled.set(true)),
-          size = 10
+          maxSize = 10
         )
         fiber <- cache.get("hello").start
         _ <- IO.sleep(10.millis)
@@ -533,13 +553,13 @@ object MurCacheTests extends TestSuite:
       })
     }
 
-    test("invalidateAll of an in-flight key clears the cache: subsequent gets re-fetch") {
+    test("invalidateAll of in-flight key clears cache: next get re-fetches") {
       var calls = 0
 
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = _ => IO.sleep(50.millis) >> IO { calls += 1; calls },
-          size = 10
+          maxSize = 10
         )
         fiber <- cache.get("hello").start
         _ <- IO.sleep(10.millis)
@@ -560,7 +580,7 @@ object MurCacheTests extends TestSuite:
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = key => IO { callCount += 1; key.length },
-          size = 10
+          maxSize = 10
         )
         _ <- cache.put("hello", 99)
         _ <- cache.invalidateAll
@@ -584,7 +604,7 @@ object MurCacheTests extends TestSuite:
                 fetchCounts.updated(key, fetchCounts.getOrElse(key, 0) + 1)
               key.length
             },
-          size = 2
+          maxSize = 2
         )
         _ <- cache.get("a")
         _ <- cache.get("b")
@@ -607,7 +627,7 @@ object MurCacheTests extends TestSuite:
                 fetchCounts.updated(key, fetchCounts.getOrElse(key, 0) + 1)
               key.length
             },
-          size = 2
+          maxSize = 2
         )
         _ <- cache.get("a")
         _ <- cache.get("b")
@@ -622,7 +642,7 @@ object MurCacheTests extends TestSuite:
       })
     }
 
-    test("accessing a cached middle key does not corrupt LRU eviction order") {
+    test("accessing cached middle key preserves LRU order") {
       var fetchCounts = Map.empty[String, Int]
 
       val test = for
@@ -633,7 +653,7 @@ object MurCacheTests extends TestSuite:
                 fetchCounts.updated(key, fetchCounts.getOrElse(key, 0) + 1)
               key.length
             },
-          size = 3
+          maxSize = 3
         )
         _ <- cache.get("a")
         _ <- cache.get("b")
@@ -651,11 +671,11 @@ object MurCacheTests extends TestSuite:
       })
     }
 
-    test("invalidating the new LRU tail after an eviction does not crash") {
+    test("invalidating new LRU tail after eviction does not crash") {
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = key => IO.pure(key.length),
-          size = 3
+          maxSize = 3
         )
         _ <- cache.get("a")
         _ <- cache.get("b")
@@ -667,7 +687,7 @@ object MurCacheTests extends TestSuite:
       run(test.map(wasPresent => assert(wasPresent == true)))
     }
 
-    test("eviction does not corrupt the previous head's LRU position") {
+    test("eviction preserves previous head's LRU position") {
       var fetchCounts = Map.empty[String, Int]
 
       val test = for
@@ -678,7 +698,7 @@ object MurCacheTests extends TestSuite:
                 fetchCounts.updated(key, fetchCounts.getOrElse(key, 0) + 1)
               key.length
             },
-          size = 3
+          maxSize = 3
         )
         _ <- cache.get("a")
         _ <- cache.get("b")
@@ -695,7 +715,7 @@ object MurCacheTests extends TestSuite:
       })
     }
 
-    test("promoting a node adjacent to the head does not orphan the old head") {
+    test("promoting node next to head does not orphan old head") {
       var fetchCounts = Map.empty[String, Int]
 
       val test = for
@@ -706,7 +726,7 @@ object MurCacheTests extends TestSuite:
                 fetchCounts.updated(key, fetchCounts.getOrElse(key, 0) + 1)
               key.length
             },
-          size = 4
+          maxSize = 4
         )
         _ <- cache.get("a")
         _ <- cache.get("b")
@@ -724,13 +744,13 @@ object MurCacheTests extends TestSuite:
       run(test.map(_ => assert(fetchCounts("c") == 2)))
     }
 
-    test("put on an existing key in a full cache does not evict or re-fetch") {
+    test("put on existing key in full cache does not evict or re-fetch") {
       var fetchCount = 0
 
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = _ => IO { fetchCount += 1; 0 },
-          size = 2
+          maxSize = 2
         )
         _ <- cache.put("a", 1)
         _ <- cache.put("b", 2)
@@ -744,13 +764,13 @@ object MurCacheTests extends TestSuite:
       })
     }
 
-    test("put on an existing key updates its LRU position") {
+    test("put on existing key updates its LRU position") {
       var fetchCount = 0
 
       val test = for
         cache <- MurCache.simple[IO, String, Int](
           fetch = _ => IO { fetchCount += 1; 0 },
-          size = 2
+          maxSize = 2
         )
         _ <- cache.put("a", 1)
         _ <- cache.put("b", 2)
@@ -776,7 +796,7 @@ object MurCacheTests extends TestSuite:
                 fetchCounts.updated(key, fetchCounts.getOrElse(key, 0) + 1)
               key.length
             },
-          size = 2
+          maxSize = 2
         )
         _ <- cache.get("a")
         _ <- cache.get("b")
@@ -789,7 +809,7 @@ object MurCacheTests extends TestSuite:
       run(test.map(_ => assert(fetchCounts("c") == 2)))
     }
 
-    test("size-1 cache evicts its only entry when a new key is fetched") {
+    test("size-1 cache evicts its only entry on new fetch") {
       var fetchCounts = Map.empty[String, Int]
 
       val test = for
@@ -800,7 +820,7 @@ object MurCacheTests extends TestSuite:
                 fetchCounts.updated(key, fetchCounts.getOrElse(key, 0) + 1)
               key.length
             },
-          size = 1
+          maxSize = 1
         )
         _ <- cache.get("a")
         _ <- cache.get("b")
@@ -813,7 +833,7 @@ object MurCacheTests extends TestSuite:
       })
     }
 
-    test("evicting an in-flight key does not cancel its original fetch") {
+    test("evicting in-flight key does not cancel its fetch") {
       var fetchCounts = Map.empty[String, Int]
 
       val test = for
@@ -825,7 +845,7 @@ object MurCacheTests extends TestSuite:
                   fetchCounts.updated(key, fetchCounts.getOrElse(key, 0) + 1)
                 key.length
               },
-          size = 1
+          maxSize = 1
         )
         fiber <- cache.get("a").start
         _ <- IO.sleep(10.millis)
@@ -846,8 +866,8 @@ object MurCacheTests extends TestSuite:
       val fetch: String => IO[Int] = key => IO { callCount += 1; key.length }
 
       val test = for
-        cache1 <- MurCache.simple[IO, String, Int](fetch, size = 10)
-        cache2 <- MurCache.simple[IO, String, Int](fetch, size = 10)
+        cache1 <- MurCache.simple[IO, String, Int](fetch, maxSize = 10)
+        cache2 <- MurCache.simple[IO, String, Int](fetch, maxSize = 10)
         _ <- cache1.get("hello")
         _ <- cache2.get("hello")
         _ <- cache1.invalidateAll
@@ -855,5 +875,34 @@ object MurCacheTests extends TestSuite:
       yield ()
 
       run(test.map(_ => assert(callCount == 2)))
+    }
+
+    test("size reflects current entry count across put, get, eviction and invalidation") {
+      val test = for
+        cache <- MurCache.simple[IO, String, Int](
+          fetch = key => IO.pure(key.length),
+          maxSize = 2
+        )
+        empty <- cache.size
+        _ <- cache.put("a", 1)
+        afterPut <- cache.size
+        _ <- cache.get("b")
+        afterGet <- cache.size
+        _ <- cache.get("c")
+        afterEviction <- cache.size
+        _ <- cache.invalidate("c")
+        afterInvalidate <- cache.size
+        _ <- cache.invalidateAll
+        afterInvalidateAll <- cache.size
+      yield (empty, afterPut, afterGet, afterEviction, afterInvalidate, afterInvalidateAll)
+
+      run(test.map { case (empty, afterPut, afterGet, afterEviction, afterInvalidate, afterInvalidateAll) =>
+        assert(empty == 0)
+        assert(afterPut == 1)
+        assert(afterGet == 2)
+        assert(afterEviction == 2)
+        assert(afterInvalidate == 1)
+        assert(afterInvalidateAll == 0)
+      })
     }
   }

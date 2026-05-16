@@ -6,6 +6,12 @@
  * You may obtain a copy of the License at
  *
  *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
  */
 
 package digital.junkie.murcache
@@ -31,6 +37,8 @@ trait MurCache[F[_], K, V] {
 
   def invalidateAll: F[Unit]
 
+  def size: F[Int]
+
 }
 
 object MurCache {
@@ -45,9 +53,12 @@ object MurCache {
     def invalidate(key: K): F[Boolean] = F.pure(false)
 
     def invalidateAll: F[Unit] = F.unit
+
+    def size = F.pure(0)
+
   }
 
-  private case class Underlying[F[_], K, V](
+  private case class UnsafeLRU[F[_], K, V](
       map: Map[K, Deferred[F, Either[Throwable, V]]],
       list: Map[K, (prev: Option[K], next: Option[K])],
       head: Option[K],
@@ -58,7 +69,7 @@ object MurCache {
 
     def contains(key: K): Boolean = map.contains(key)
 
-    def -(key: K): Underlying[F, K, V] = {
+    def -(key: K): UnsafeLRU[F, K, V] = {
       val (newList, newHead, newTail) = list.get(key) match {
         // head
         case Some((prev = Some(prev), next = None)) =>
@@ -94,7 +105,7 @@ object MurCache {
           (list, head, tail)
       }
 
-      Underlying(
+      UnsafeLRU(
         map - key,
         newList,
         newHead,
@@ -106,13 +117,13 @@ object MurCache {
         key: K,
         value: Deferred[F, Either[Throwable, V]],
         pushOut: Boolean
-    ): Underlying[F, K, V] = {
+    ): UnsafeLRU[F, K, V] = {
       if (pushOut) {
         val newMap = map + (key -> value) - tail.get
         list(tail.get).next match {
           case None =>
             // single-element cache: replace the only entry
-            Underlying(
+            UnsafeLRU(
               map = newMap,
               list = Map(key -> (prev = None, next = None)),
               head = Some(key),
@@ -131,7 +142,7 @@ object MurCache {
                   + (newTailKey -> (prev = None, next = list(newTailKey).next))
                   + (head.get -> (prev = list(head.get).prev, next = Some(key)))
                   + (key -> (prev = head, next = None))
-            Underlying(
+            UnsafeLRU(
               map = newMap,
               list = newList,
               head = Some(key),
@@ -143,7 +154,7 @@ object MurCache {
           val promoted = touch(key)
           promoted.copy(map = promoted.map + (key -> value))
         } else {
-          Underlying(
+          UnsafeLRU(
             map = map + (key -> value),
             list = head match {
               case Some(head) =>
@@ -160,7 +171,7 @@ object MurCache {
       }
     }
 
-    def touch(key: K): Underlying[F, K, V] = {
+    def touch(key: K): UnsafeLRU[F, K, V] = {
       list.get(key) match {
         case Some((prev = Some(_), next = None)) => this // already head
         case Some((None, None))                  => this // single element
@@ -170,7 +181,7 @@ object MurCache {
           // tail: promote to head
           if (nextKey == head.get)
             // 2-element cache: nextKey IS the old head
-            Underlying(
+            UnsafeLRU(
               map,
               list + (nextKey -> (prev = None, next = Some(key)))
                 + (key -> (prev = Some(nextKey), next = None)),
@@ -179,7 +190,7 @@ object MurCache {
             )
           else
             // 3+ elements
-            Underlying(
+            UnsafeLRU(
               map,
               list + (nextKey -> (prev = None, next = list(nextKey).next))
                 + (head.get -> (prev = list(head.get).prev, next = Some(key)))
@@ -192,7 +203,7 @@ object MurCache {
           // middle: promote to head
           if (nextKey == head.get)
             // adjacent to head: nextKey and head are the same node
-            Underlying(
+            UnsafeLRU(
               map,
               list + (prevKey -> (
                 prev = list(prevKey).prev,
@@ -205,7 +216,7 @@ object MurCache {
             )
           else
             // general case
-            Underlying(
+            UnsafeLRU(
               map,
               list + (prevKey -> (
                 prev = list(prevKey).prev,
@@ -221,30 +232,29 @@ object MurCache {
     }
 
     def get(key: K): Option[Deferred[F, Either[Throwable, V]]] = {
-      val result = map.get(key)
-      result
+      map.get(key)
     }
   }
 
   def simple[F[_], K, V](
       fetch: K => F[V],
-      size: Int
+      maxSize: Int
   )(implicit F: Concurrent[F]): F[MurCache[F, K, V]] = {
-    if (size <= 0) {
+    if (maxSize <= 0) {
       F.pure { noop(fetch) }
     } else {
       Ref
-        .of[F, Underlying[F, K, V]] {
-          Underlying[F, K, V](Map.empty, Map.empty, None, None)
+        .of[F, UnsafeLRU[F, K, V]] {
+          UnsafeLRU[F, K, V](Map.empty, Map.empty, None, None)
         }
-        .map { impl(fetch, size, _) }
+        .map { impl(fetch, maxSize, _) }
     }
   }
 
   private def impl[F[_], K, V](
       fetch: K => F[V],
-      size: Int,
-      r: Ref[F, Underlying[F, K, V]]
+      maxSize: Int,
+      r: Ref[F, UnsafeLRU[F, K, V]]
   )(implicit F: Concurrent[F]): MurCache[F, K, V] = new MurCache[F, K, V] {
 
     def cancelError = new CancellationException("task cancelled")
@@ -306,7 +316,7 @@ object MurCache {
                         }
 
                       (
-                        u + (key, newD, !u.contains(key) && u.size >= size),
+                        u + (key, newD, !u.contains(key) && u.size >= maxSize),
                         effect
                       )
                 }
@@ -332,7 +342,7 @@ object MurCache {
       Deferred[F, Either[Throwable, V]].flatMap { newD =>
         r.flatModifyFull { (_, u) =>
           val current = u.get(key)
-          val updated = u + (key, newD, !u.contains(key) && u.size >= size)
+          val updated = u + (key, newD, !u.contains(key) && u.size >= maxSize)
           val publish = {
             val result = value.asRight[Throwable]
             val wakeCurrent = current match {
@@ -352,7 +362,9 @@ object MurCache {
       r.modify { m => (m.-(key), m.contains(key)) }
 
     def invalidateAll: F[Unit] =
-      r.getAndSet(Underlying(Map.empty, Map.empty, None, None)).void
+      r.getAndSet(UnsafeLRU(Map.empty, Map.empty, None, None)).void
+
+    def size: F[Int] = r.get.map(_.size)
 
   }
 

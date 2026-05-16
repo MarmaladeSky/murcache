@@ -1,6 +1,6 @@
 = Murcache
 
-A very simple effectful LRU cache for https://typelevel.org/cats-effect/[Cats Effect] with support for https://www.scala-js.org/[Scala.js] and https://scala-native.org/[Scala Native].
+A very primitive effectful LRU cache for https://typelevel.org/cats-effect/[Cats Effect] with support for https://www.scala-js.org/[Scala.js] and https://scala-native.org/[Scala Native] without external dependencies.
 
 == Usage
 
@@ -43,3 +43,10 @@ val program = for {
   _ <- cache.invalidate("hello")
 } yield (first, second, third)
 ----
+
+=== Roadmap
+
+* [x] Basic implementation
+* [ ] Refine load cancellation: original fiber cancellation should not cancel subsequent waiters
+* [ ] Weight-based cache sizing
+* [ ] Passive time based eviction
