@@ -31,6 +31,8 @@ trait MurCache[F[_], K, V] {
 
   def get(key: K): F[V]
 
+  def get(key: K, fetch: K => F[V]): F[V]
+
   def put(key: K, value: V): F[Unit]
 
   def invalidate(key: K): F[Boolean]
@@ -47,6 +49,8 @@ object MurCache {
       fetch: K => F[V]
   )(implicit F: Concurrent[F]): MurCache[F, K, V] = new MurCache[F, K, V] {
     def get(key: K): F[V] = fetch(key)
+
+    def get(key: K, fetch: K => F[V]): F[V] = fetch(key)
 
     def put(key: K, value: V): F[Unit] = F.unit
 
@@ -270,71 +274,64 @@ object MurCache {
         }
       }
 
-    def get(key: K): F[V] = {
-      r.get.flatMap { m =>
-        m.get(key) match {
-          case Some(d) => // fast path
-            r.flatModifyFull { (_, u) =>
-              (u.touch(key), d.get.flatMap(_.liftTo[F]))
-            }
-          case None =>
-            Deferred[F, Either[Throwable, V]].flatMap { newD =>
-              r
-                // returns fetch fiber if we have one and the related Deferred
-                .flatModify { u =>
-                  u.get(key) match
-                    case Some(d) =>
-                      (u, F.pure((d, Option.empty[Fiber[F, Throwable, Unit]])))
-                    case None =>
-                      val runFetch = fetch(key).attempt
-                        .flatTap(newD.complete)
-                        .flatTap { x =>
-                          if (x.isLeft) removeIfCurrent(key, newD)
-                          else F.unit
-                        }
-                        .onCancel(
-                          removeIfCurrent(key, newD) >>
-                            newD
-                              .complete(Left(cancelError))
-                              .void
-                        )
-                        .void
-                        .handleErrorWith {
-                          case _: CancellationException => F.unit
-                          case e                        => F.raiseError(e)
-                        }
+    def get(key: K): F[V] = get(key, fetch)
 
-                      val effect = F
-                        .start(runFetch)
-                        .map { f =>
-                          (
-                            newD,
-                            Option
-                              .empty[Fiber[F, Throwable, Unit]]
-                              .orElse(Some(f))
-                          )
-                        }
-
-                      (
-                        u + (key, newD, !u.contains(key) && u.size >= maxSize),
-                        effect
+    def get(key: K, fetch: K => F[V]): F[V] = r.get.flatMap { m =>
+      m.get(key) match {
+        case Some(d) => // fast path
+          r.flatModifyFull { (_, u) =>
+            (u.touch(key), d.get.flatMap(_.liftTo[F]))
+          }
+        case None =>
+          Deferred[F, Either[Throwable, V]].flatMap { newD =>
+            r
+              // returns fetch fiber if we have one and the related Deferred
+              .flatModify { u =>
+                u.get(key) match
+                  case Some(d) =>
+                    (u, F.pure((d, Option.empty[Fiber[F, Throwable, Unit]])))
+                  case None =>
+                    val runFetch = fetch(key).attempt
+                      .flatTap(newD.complete)
+                      .flatTap { x =>
+                        if (x.isLeft) removeIfCurrent(key, newD)
+                        else F.unit
+                      }
+                      .onCancel(
+                        removeIfCurrent(key, newD) >>
+                          newD
+                            .complete(Left(cancelError))
+                            .void
                       )
-                }
-                // cancel fetch fiber if we got the Deferred completed
-                .flatMap { (d, fetchFiber) =>
-                  val await = d.get.flatMap(_.liftTo[F])
-                  fetchFiber match {
-                    case Some(fiber) =>
-                      await
-                        .flatTap(_ => fiber.cancel)
-                        .onError(_ => fiber.cancel)
-                        .onCancel(fiber.cancel)
-                    case None => await
+                      .void
+                      .handleErrorWith {
+                        case _: CancellationException => F.unit
+                        case e                        => F.raiseError(e)
+                      }
 
-                  }
+                    val effect = F
+                      .start(runFetch)
+                      .map { f => (newD, Option(f)) }
+
+                    (
+                      u + (key, newD, !u.contains(key) && u.size >= maxSize),
+                      effect
+                    )
+              }
+              // cancel fetch fiber if we got the Deferred completed
+              .flatMap { (d, fetchFiber) =>
+                val await = d.get.flatMap(_.liftTo[F])
+                fetchFiber match {
+                  case Some(fiber) =>
+                    await
+                      .flatTap(_ => fiber.cancel)
+                      .onError(_ => fiber.cancel)
+                      .onCancel(fiber.cancel)
+                  case None => await
+
                 }
-            }
-        }
+              }
+          }
       }
     }
 
@@ -346,10 +343,8 @@ object MurCache {
           val publish = {
             val result = value.asRight[Throwable]
             val wakeCurrent = current match {
-              case Some(existing) if existing != newD =>
-                existing.complete(result).void
-              case _ =>
-                F.unit
+              case Some(existing) => existing.complete(result).void
+              case _              => F.unit
             }
             newD.complete(result).void >> wakeCurrent
           }
