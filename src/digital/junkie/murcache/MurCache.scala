@@ -29,8 +29,6 @@ import scala.concurrent.CancellationException
 
 trait MurCache[F[_], K, V] {
 
-  def get(key: K): F[V]
-
   def get(key: K, fetch: K => F[V]): F[V]
 
   def put(key: K, value: V): F[Unit]
@@ -43,12 +41,36 @@ trait MurCache[F[_], K, V] {
 
 }
 
+trait MurCacheWithDefault[F[_], K, V] extends MurCache[F, K, V] {
+
+  def get(key: K): F[V]
+
+}
+
 object MurCache {
 
-  def noop[F[_], K, V](
-      fetch: K => F[V]
-  )(implicit F: Concurrent[F]): MurCache[F, K, V] = new MurCache[F, K, V] {
-    def get(key: K): F[V] = fetch(key)
+  def withDefault[F[_], K, V](
+      default: K => F[V],
+      m: MurCache[F, K, V]
+  ): MurCacheWithDefault[F, K, V] = new MurCacheWithDefault[F, K, V] {
+
+    def get(key: K, fetch: K => F[V]): F[V] = m.get(key, fetch)
+
+    def put(key: K, value: V): F[Unit] = m.put(key, value)
+
+    def invalidate(key: K): F[Boolean] = m.invalidate(key)
+
+    def invalidateAll: F[Unit] = m.invalidateAll
+
+    def size: F[Int] = m.size
+
+    def get(key: K): F[V] = m.get(key, default)
+
+  }
+
+  def noop[F[_], K, V]()(implicit
+      F: Concurrent[F]
+  ): MurCache[F, K, V] = new MurCache[F, K, V] {
 
     def get(key: K, fetch: K => F[V]): F[V] = fetch(key)
 
@@ -61,6 +83,10 @@ object MurCache {
     def size = F.pure(0)
 
   }
+
+  def noop[F[_], K, V](default: K => F[V])(implicit
+      F: Concurrent[F]
+  ): MurCacheWithDefault[F, K, V] = withDefault(default, noop[F, K, V]())
 
   private case class UnsafeLRU[F[_], K, V](
       map: Map[K, Deferred[F, Either[Throwable, V]]],
@@ -241,25 +267,40 @@ object MurCache {
   }
 
   def simple[F[_], K, V](
-      fetch: K => F[V],
       maxSize: Int
   )(implicit F: Concurrent[F]): F[MurCache[F, K, V]] = {
     if (maxSize <= 0) {
-      F.pure { noop(fetch) }
+      F.pure { noop() }
     } else {
       Ref
         .of[F, UnsafeLRU[F, K, V]] {
           UnsafeLRU[F, K, V](Map.empty, Map.empty, None, None)
         }
-        .map { impl(fetch, maxSize, _) }
+        .map { impl(maxSize, _) }
+    }
+  }
+
+  def simple[F[_], K, V](
+      default: K => F[V],
+      maxSize: Int
+  )(implicit F: Concurrent[F]): F[MurCacheWithDefault[F, K, V]] = {
+    if (maxSize <= 0) {
+      F.pure { withDefault(default, noop()) }
+    } else {
+      Ref
+        .of[F, UnsafeLRU[F, K, V]] {
+          UnsafeLRU[F, K, V](Map.empty, Map.empty, None, None)
+        }
+        .map { underlying => withDefault(default, impl(maxSize, underlying)) }
     }
   }
 
   private def impl[F[_], K, V](
-      fetch: K => F[V],
       maxSize: Int,
       r: Ref[F, UnsafeLRU[F, K, V]]
-  )(implicit F: Concurrent[F]): MurCache[F, K, V] = new MurCache[F, K, V] {
+  )(implicit
+      F: Concurrent[F]
+  ): MurCache[F, K, V] = new MurCache[F, K, V] {
 
     def cancelError = new CancellationException("task cancelled")
 
@@ -273,8 +314,6 @@ object MurCache {
           case _                                    => u
         }
       }
-
-    def get(key: K): F[V] = get(key, fetch)
 
     def get(key: K, fetch: K => F[V]): F[V] = r.get.flatMap { m =>
       m.get(key) match {

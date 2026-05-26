@@ -33,8 +33,8 @@ import digital.junkie.murcache.MurCache
 
 val program = for {
   cache <- MurCache.simple[IO, String, Int](
-    fetch = key => IO.pure(key.length),
-    size = 2
+    default = key => IO.pure(key.length),
+    maxSize = 2
   )
   first <- cache.get("hello")
   second <- cache.get("hello")
