@@ -13,7 +13,7 @@ import mill.api.BuildCtx
 
 trait MurCachePublish extends PublishModule {
   def artifactName = "murcache"
-  def publishVersion = "0.0.1-SNAPSHOT"
+  def publishVersion = "0.0.1"
 
   def pomSettings = PomSettings(
     description = "A KISS LRU cache for Cats Effect",
